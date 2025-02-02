@@ -1,0 +1,96 @@
+// Broken into 3 steps to handle GEE computational limit
+// Ammended version of the Sentinel one
+
+///////////////////////////////////////////////////// Step 1 /////////////////////////////////////////////////////
+// Define the AOI. Only looking at 3 states in test to reduce compuatational cost
+// https://myheartlandweb.com/StoryMaps/USWheatAssociates/USWheatSupplyChain/
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+var cdl = ee.Image("USDA/NASS/CDL/2022").select("cropland");
+var winterWheat = cdl.eq(24);  // Create binary mask
+var hrwStates = ee.FeatureCollection("TIGER/2018/States").filter(
+  ee.Filter.inList("NAME", ["Kansas", "Oklahoma", "Texas"])
+);
+var hrwGeometry = hrwStates.geometry();
+var hrwWheat = winterWheat.updateMask(winterWheat).clip(hrwGeometry);
+
+Export.image.toAsset({
+  image: hrwWheat,
+  description: "WinterWheat_HRW_2022_landsat",
+  assetId: "projects/bts-satcomm/assets/WinterWheat_HRW_2022_landsat",
+  scale: 30,  // This is Landsat resolution (was 10m for Sentinel-2)
+  region: hrwGeometry,
+  maxPixels: 1e13
+});
+
+
+///////////////////////////////////////////////////// Step 2 /////////////////////////////////////////////////////
+// NDVI
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+var winterWheatGeom = ee.Image("projects/bts-satcomm/assets/WinterWheat_HRW_2022").geometry();
+var computeNDVIStats = function(dateStr) {
+  var date = ee.Date(dateStr);
+  var landsatScenes = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+    .filterBounds(winterWheatGeom)
+    .filterDate(date, date.advance(1, "day"));
+  var numScenes = landsatScenes.size();
+  var hasImages = numScenes.gt(0);
+  var meanNDVI = ee.Algorithms.If(hasImages,
+    landsatScenes.mean().expression(
+      "(nir - red) / (nir + red)", {
+        "nir": landsatScenes.mean().select("SR_B5").multiply(0.0000275).add(-0.2),
+        "red": landsatScenes.mean().select("SR_B4").multiply(0.0000275).add(-0.2)
+      }
+    ).rename("NDVI")
+    .reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: winterWheatGeom,
+      scale: 30,  // Landsat resolution
+      maxPixels: 1e13,
+      bestEffort: true
+    }).get("NDVI"),
+    "N/A"  // If no images exist, return "N/A"
+  );
+  return ee.Feature(null, {
+    "Date": date.format("YYYY-MM-dd"),
+    "Mean_NDVI": meanNDVI,
+    "Scene_Count": numScenes
+  });
+};
+var startDate = ee.Date("2022-07-01");
+var endDate = ee.Date("2022-09-30");
+var dateList = ee.List.sequence(0, endDate.difference(startDate, "day").subtract(1))
+  .map(function(n) {
+    return startDate.advance(n, "day").format("YYYY-MM-dd");
+  });
+var ndviTimeSeries = ee.FeatureCollection(dateList.map(computeNDVIStats));
+
+Export.table.toDrive({
+  collection: ndviTimeSeries,
+  description: "HRW_Wheat_NDVI_Q3_2022_Landsat",
+  fileFormat: "CSV"
+});
+
+///////////////////////////////////////////////////// Step 3 ///////////////////////////////////////////////////// 
+// Create visualisations of AOI
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+var cdl = ee.Image("USDA/NASS/CDL/2022").select("cropland");
+var winterWheat = cdl.eq(24);  // Create binary mask
+var hrwStates = ee.FeatureCollection("TIGER/2018/States").filter(
+  ee.Filter.inList("NAME", ["Kansas", "Oklahoma", "Texas"])
+);
+var hrwGeometry = hrwStates.geometry();
+var hrwWheat = winterWheat.updateMask(winterWheat).clip(hrwGeometry);
+
+Export.image.toDrive({
+  image: hrwWheat,
+  description: "WinterWheat_HRW_2022_GeoTIFF_Landsat",
+  folder: "GEE_Exports",  // Change or remove this if needed
+  fileNamePrefix: "WinterWheat_HRW_2022_Landsat_Vis",
+  scale: 30,  // Landsat resolution (high enough for analysis)
+  region: hrwGeometry,
+  maxPixels: 1e13,
+  fileFormat: "GeoTIFF"
+});
